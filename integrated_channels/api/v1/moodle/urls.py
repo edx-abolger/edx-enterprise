@@ -1,0 +1,11 @@
+"""
+    url mappings for integrated_channels/v1/moodle/
+"""
+
+from rest_framework import routers
+
+from .views import MoodleConfigurationViewSet
+
+router = routers.DefaultRouter()  # pylint: disable=invalid-name
+router.register(r'^configuration', MoodleConfigurationViewSet, basename="configuration")
+urlpatterns = router.urls
