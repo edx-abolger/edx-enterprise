@@ -154,8 +154,37 @@ class BlackboardAPIClient(IntegratedChannelApiClient):
 
     def create_assessment_reporting(self, user_id, payload):
         """
-        Not implemented yet
+        Post a learner's subsection assessment grade to the integrated Blackboard course.
+
+        Parameters:
+        -----------
+            user_id (str): The shared email between a user's edX account and Blackboard account
+            payload (str): The (string representation) of the learner data information
         """
+        self._create_session()
+        learner_data = json.loads(payload)
+        external_id = learner_data.get('courseID')
+
+        course_id = self._resolve_blackboard_course_id(external_id)
+        BlackboardAPIClient._validate_course_id(course_id, external_id)
+
+        blackboard_user_id = self._get_bb_user_id_from_enrollments(user_id, course_id)
+        grade_column_id = self._get_or_create_integrated_grade_column(
+            course_id,
+            learner_data.get('subsection_name'),
+            learner_data.get('subsectionID'),
+            learner_data.get('points_possible'),
+        )
+
+        grade = learner_data.get('points_earned')
+        submission_response = self._submit_grade_to_blackboard(grade, course_id, grade_column_id, blackboard_user_id)
+
+        success_body = 'Successfully posted grade of {grade} to course:{course_id} for user:{user_email}.'.format(
+            grade=grade,
+            course_id=external_id,
+            user_email=user_id,
+        )
+        return submission_response.status_code, success_body
 
     def create_course_completion(self, user_id, payload):
         """
@@ -180,36 +209,24 @@ class BlackboardAPIClient(IntegratedChannelApiClient):
         external_id = learner_data.get('courseID')
 
         course_id = self._resolve_blackboard_course_id(external_id)
-
-        # Sanity check for course id
-        if not course_id:
-            raise ClientError(
-                'Could not find course:{} on Blackboard'.format(external_id),
-                HTTPStatus.NOT_FOUND.value
-            )
+        BlackboardAPIClient._validate_course_id(course_id, external_id)
 
         blackboard_user_id = self._get_bb_user_id_from_enrollments(user_id, course_id)
-        grade_column_id = self._get_or_create_integrated_grade_column(course_id)
-
-        grade = learner_data.get('grade') * 100
-        grade_percent = {'score': grade}
-        response = self._patch(
-            self.generate_post_users_grade_url(course_id, grade_column_id, blackboard_user_id),
-            grade_percent
+        grade_column_id = self._get_or_create_integrated_grade_column(
+            course_id,
+            "(edX Integration) Final Grade",
+            "edx_final_grade"
         )
 
-        if response.json().get('score') != grade:
-            raise ClientError(
-                'Failed to post new grade for user={} enrolled in course={}'.format(user_id, course_id),
-                HTTPStatus.INTERNAL_SERVER_ERROR.value
-            )
+        grade = learner_data.get('grade') * 100
+        submission_response = self._submit_grade_to_blackboard(grade, course_id, grade_column_id, blackboard_user_id)
 
         success_body = 'Successfully posted grade of {grade} to course:{course_id} for user:{user_email}.'.format(
             grade=grade,
             course_id=external_id,
             user_email=user_id,
         )
-        return response.status_code, success_body
+        return submission_response.status_code, success_body
 
     def delete_course_completion(self, user_id, payload):  # pylint: disable=unused-argument
         """TODO: course completion deletion is currently not easily supported"""
@@ -512,7 +529,7 @@ class BlackboardAPIClient(IntegratedChannelApiClient):
             HTTPStatus.NOT_FOUND.value
         )
 
-    def _get_or_create_integrated_grade_column(self, bb_course_id):
+    def _get_or_create_integrated_grade_column(self, bb_course_id, grade_column_name, external_id, points_possible=100):
         """
         Helper method to search an edX integrated Blackboard course for the designated edX grade column.
         If the column does not yet exist within the course, create it.
@@ -528,18 +545,18 @@ class BlackboardAPIClient(IntegratedChannelApiClient):
 
         grade_column_id = None
         for grade_column in grade_columns:
-            if grade_column.get('externalId') == 'edx_final_grade':
+            if grade_column.get('externalId') == external_id:
                 grade_column_id = grade_column.get('id')
         if not grade_column_id:
             # Potential customization here per-customer, if the need arises.
             grade_column_data = {
-                "externalId": "edx_final_grade",
-                "name": "edx final grade",
-                "displayName": "(edX Integration) Final Grade",
-                "description": "Student's final edX course grade",
+                "externalId": external_id,
+                "name": grade_column_name,
+                "displayName": grade_column_name,
+                "description": "edX learner's grade.",
                 "externalGrade": True,
                 "score": {
-                    "possible": 100
+                    "possible": points_possible
                 },
                 "availability": {
                     "available": "Yes"
@@ -567,6 +584,25 @@ class BlackboardAPIClient(IntegratedChannelApiClient):
                 )
 
         return grade_column_id
+
+    def _submit_grade_to_blackboard(self, grade, course_id, grade_column_id, user_id):
+        """
+        Helper method to post learner data to the integrated blackboard course and then validate the submission of
+        grade reporting.
+        """
+        grade_percent = {'score': grade}
+        response = self._patch(
+            self.generate_post_users_grade_url(course_id, grade_column_id, blackboard_user_id),
+            grade_percent
+        )
+
+        if response.json().get('score') != grade:
+            raise ClientError(
+                'Failed to post new grade for user={} enrolled in course={}'.format(user_id, course_id),
+                HTTPStatus.INTERNAL_SERVER_ERROR.value
+            )
+
+        return response
 
     def delete_course_content_from_blackboard(self, bb_course_id, bb_content_id):
         """
